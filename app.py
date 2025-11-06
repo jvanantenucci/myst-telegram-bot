@@ -1,13 +1,12 @@
 # -- coding: utf-8 --
 """
-MYST Presale Bot – auto-payout BEP-20 su BSC (webhook mode per Render)
+MYST Presale Bot – webhook ready for Render (python-telegram-bot==20.7)
 
-Dipendenze principali (requirements.txt):
-  python-telegram-bot==21.4
+Requisiti (requirements.txt):
+  python-telegram-bot==20.7
   web3==6.19.0
   python-dotenv==1.0.1
   nest_asyncio==1.6.0
-  gunicorn
 """
 
 import os
@@ -25,59 +24,63 @@ from web3.exceptions import TransactionNotFound, TimeExhausted
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Precisione per i calcoli decimali
+# PTB usa aiohttp sotto: la usiamo per il health-check "/"
+from aiohttp import web
+
+# Precisione per i calcoli
 getcontext().prec = 50
 
-# ─────────────────── ENV ───────────────────
+# ── ENV ──────────────────────────────────────────────────────────
 load_dotenv()
 
-BOT_TOKEN        = os.getenv("BOT_TOKEN")
-ADMIN_USER_ID    = int(os.getenv("ADMIN_USER_ID", "0"))
+BOT_TOKEN         = os.getenv("BOT_TOKEN")
+ADMIN_USER_ID     = int(os.getenv("ADMIN_USER_ID", "0"))
 
-BSC_RPC          = os.getenv("BSC_RPC", "https://bsc-dataseed.binance.org")
+BSC_RPC           = os.getenv("BSC_RPC", "https://bsc-dataseed.binance.org")
 
-TOKEN_ADDRESS    = Web3.to_checksum_address(os.getenv("TOKEN_ADDRESS"))
-TOKEN_DECIMALS   = int(os.getenv("TOKEN_DECIMALS", "18"))
+TOKEN_ADDRESS     = Web3.to_checksum_address(os.getenv("TOKEN_ADDRESS"))
+TOKEN_DECIMALS    = int(os.getenv("TOKEN_DECIMALS", "18"))
 
-INCASSO_ADDRESS  = Web3.to_checksum_address(os.getenv("INCASSO_ADDRESS"))
+INCASSO_ADDRESS   = Web3.to_checksum_address(os.getenv("INCASSO_ADDRESS"))
 
-TREASURY_ADDRESS = Web3.to_checksum_address(os.getenv("TREASURY_ADDRESS"))
-TREASURY_PRIVKEY = os.getenv("TREASURY_PRIVKEY")
+TREASURY_ADDRESS  = Web3.to_checksum_address(os.getenv("TREASURY_ADDRESS"))
+TREASURY_PRIVKEY  = os.getenv("TREASURY_PRIVKEY")
 
-RATE             = Decimal(os.getenv("RATE", "1900000"))  # MYST per 1 BNB
-BONUS_BPS        = int(os.getenv("BONUS_BPS", "5000"))    # 100 bps = 1%
-MIN_BNB          = Decimal(os.getenv("MIN_BNB", "0.01"))
-MAX_BNB          = Decimal(os.getenv("MAX_BNB", "1"))
+RATE              = Decimal(os.getenv("RATE", "1900000"))      # MYST per 1 BNB
+BONUS_BPS         = int(os.getenv("BONUS_BPS", "5000"))        # 100 bps = 1%
+MIN_BNB           = Decimal(os.getenv("MIN_BNB", "0.01"))
+MAX_BNB           = Decimal(os.getenv("MAX_BNB", "1"))
 
-AUTO_PAYOUT      = os.getenv("AUTO_PAYOUT", "1") == "1"
-DAILY_CAP_MYST   = Decimal(os.getenv("DAILY_CAP_MYST", "5000000"))
-MAX_PER_TX_MYST  = Decimal(os.getenv("MAX_PER_TX_MYST", "2000000"))
+AUTO_PAYOUT       = os.getenv("AUTO_PAYOUT", "1") == "1"
+DAILY_CAP_MYST    = Decimal(os.getenv("DAILY_CAP_MYST", "5000000"))
+MAX_PER_TX_MYST   = Decimal(os.getenv("MAX_PER_TX_MYST", "2000000"))
 
-PUBLIC_URL       = os.getenv("PUBLIC_URL")  # es: https://myst-telegram-bot.onrender.com
-PORT             = int(os.getenv("PORT", "10000"))
+PUBLIC_URL        = os.getenv("PUBLIC_URL")  # ES. https://myst-telegram-bot.onrender.com
+PORT              = int(os.getenv("PORT", "10000"))
 
-# ─────────────────── Web3 ───────────────────
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN non impostato")
+if not PUBLIC_URL or not PUBLIC_URL.startswith("https://"):
+    raise RuntimeError("PUBLIC_URL non impostata o non HTTPS (es. https://mio-servizio.onrender.com)")
+
+# ── Web3 ─────────────────────────────────────────────────────────
 w3 = Web3(Web3.HTTPProvider(BSC_RPC, request_kwargs={"timeout": 15}))
 
 # ABI minimo ERC20
 ERC20_ABI = [
-    {"constant": True, "inputs": [], "name": "name",
-     "outputs": [{"name": "", "type": "string"}], "type": "function"},
-    {"constant": False, "inputs": [{"name": "_to", "type": "address"},
-                                   {"name": "_value", "type": "uint256"}],
-     "name": "transfer", "outputs": [{"name": "", "type": "bool"}], "type": "function"},
-    {"constant": True, "inputs": [], "name": "symbol",
-     "outputs": [{"name": "", "type": "string"}], "type": "function"},
-    {"constant": True, "inputs": [{"name": "_owner", "type": "address"}],
-     "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
-    {"constant": True, "inputs": [], "name": "decimals",
-     "outputs": [{"name": "", "type": "uint8"}], "type": "function"},
+    {"constant": True, "inputs": [], "name": "name", "outputs": [{"name": "", "type": "string"}], "type": "function"},
+    {"constant": False, "inputs": [{"name": "_to","type":"address"},{"name":"_value","type":"uint256"}],
+     "name":"transfer", "outputs":[{"name":"","type":"bool"}], "type": "function"},
+    {"constant": True, "inputs": [], "name": "symbol", "outputs": [{"name": "", "type": "string"}], "type": "function"},
+    {"constant": True, "inputs": [{"name":"_owner","type":"address"}],
+     "name":"balanceOf", "outputs":[{"name":"balance","type":"uint256"}], "type": "function"},
+    {"constant": True, "inputs": [], "name": "decimals", "outputs": [{"name": "", "type": "uint8"}], "type": "function"},
 ]
 
 token = w3.eth.contract(address=TOKEN_ADDRESS, abi=ERC20_ABI)
 TOKEN_SYMBOL = None
 
-# ───────────── Idempotenza payout ─────────────
+# ── Idempotenza (anti-doppio payout) ─────────────────────────────
 PROCESSED_FILE = Path("processed_tx.json")
 _processed: dict[str, dict] = {}
 _processed_lock = asyncio.Lock()
@@ -111,7 +114,7 @@ async def is_processed(txhash: str) -> bool:
     async with _processed_lock:
         return txhash.lower() in _processed
 
-# ─────────────────── Utils ───────────────────
+# ── Utils ────────────────────────────────────────────────────────
 @dataclass
 class Quote:
     bnb_amount: Decimal
@@ -128,7 +131,7 @@ def quote_for_bnb(bnb_amount: Decimal) -> Quote:
 def myst_to_units(amount_myst: Decimal) -> int:
     return int((amount_myst * (Decimal(10) ** TOKEN_DECIMALS)).to_integral_value())
 
-# ──────────────── Handlers ─────────────────
+# ── Comandi base ─────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
         "🚀 MYST Presale — Phase 1\n\n"
@@ -142,7 +145,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "2) Usa /submit <txhash> <tuoWalletBSC> per ricevere i MYST.\n\n"
         "ℹ️ Comandi: /wallet • /price • /status <txhash>"
     )
-    await update.message.reply_markdown_v2(txt)
+    await update.message.reply_text(txt)
 
 async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"💼 Wallet incasso (BNB):\n{INCASSO_ADDRESS}", quote=True)
@@ -153,6 +156,7 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💰 1 BNB = {int(q.myst_base):,} MYST (+{int(q.myst_bonus):,} bonus) → {int(q.myst_total):,} MYST"
     )
 
+# ── Verifica e payout ────────────────────────────────────────────
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 1:
         await update.message.reply_text("Uso: /status <txhash>")
@@ -173,10 +177,6 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await verify_tx_and_show(update, txhash, dest_wallet, preview_only=False)
 
-async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Comando non riconosciuto. Prova /start.")
-
-# ───────────── Verifica + payout ────────────
 async def verify_tx_and_show(update: Update, txhash: str, payout_wallet: str | None, preview_only: bool):
     msg = await update.message.reply_text("🔎 Verifico la transazione su BSC…")
     txhash = txhash.strip()
@@ -186,7 +186,7 @@ async def verify_tx_and_show(update: Update, txhash: str, payout_wallet: str | N
         return
 
     if not preview_only and await is_processed(txhash):
-        await msg.edit_text("✅ Transazione già registrata e pagata in precedenza. Nessun nuovo payout eseguito.")
+        await msg.edit_text("✅ Transazione già registrata. Nessun nuovo payout.")
         return
 
     try:
@@ -201,7 +201,7 @@ async def verify_tx_and_show(update: Update, txhash: str, payout_wallet: str | N
     try:
         receipt = w3.eth.wait_for_transaction_receipt(txhash, timeout=60, poll_latency=2)
     except TimeExhausted:
-        await msg.edit_text("⏱️ La transazione non è ancora confermata (timeout 60s). Riprova tra poco.")
+        await msg.edit_text("⏱️ La transazione non è ancora confermata (timeout 60s).")
         return
     except Exception as e:
         await msg.edit_text(f"❌ Errore receipt: {e}")
@@ -224,17 +224,18 @@ async def verify_tx_and_show(update: Update, txhash: str, payout_wallet: str | N
 
     if to_addr != INCASSO_ADDRESS:
         await msg.edit_text(
-            "❌ La TX non è diretta al wallet d’incasso ufficiale.\n"
+            "❌ La TX non è diretta al wallet d’incasso.\n"
             f"Atteso: {INCASSO_ADDRESS}\nTrovato: {to_addr}"
         )
         return
 
     bnb_amount = Decimal(Web3.from_wei(tx["value"], "ether"))
     if bnb_amount < MIN_BNB or bnb_amount > MAX_BNB:
-        await msg.edit_text(f"❌ Importo fuori limiti. Min {MIN_BNB} BNB – Max {MAX_BNB} BNB.")
+        await msg.edit_text(f"❌ Importo fuori limiti. Min {MIN_BNB} – Max {MAX_BNB} BNB.")
         return
 
     q = quote_for_bnb(bnb_amount)
+
     base_text = (
         "✅ Transazione verificata!\n"
         f"• From: {tx['from']}\n"
@@ -251,30 +252,21 @@ async def verify_tx_and_show(update: Update, txhash: str, payout_wallet: str | N
         return
 
     if q.myst_total > MAX_PER_TX_MYST:
-        await msg.edit_text(
-            base_text + f"⚠️ Limite per singolo payout: {int(MAX_PER_TX_MYST):,} MYST. Contatta supporto."
-        )
+        await msg.edit_text(base_text + f"⚠️ Limite per payout: {int(MAX_PER_TX_MYST):,} MYST.")
         return
 
     if not payout_wallet:
-        await msg.edit_text(
-            base_text + "❗ Nessun wallet BSC di destinazione indicato. Usa: /submit <txhash> <walletBSC>"
-        )
+        await msg.edit_text(base_text + "❗ Serve il wallet BSC di destinazione. Usa: /submit <txhash> <walletBSC>")
         return
 
     try:
         payout_tx = send_erc20(payout_wallet, q.myst_total)
         await mark_processed(txhash, payout_wallet, myst_to_units(q.myst_total))
-        await msg.edit_text(
-            base_text
-            + f"📨 Payout inviato a {payout_wallet}.\n"
-            + f"Tx: https://bscscan.com/tx/{payout_tx}"
-        )
+        await msg.edit_text(base_text + f"📨 Payout inviato a {payout_wallet}.\nTx: https://bscscan.com/tx/{payout_tx}")
     except Exception as e:
         await msg.edit_text(base_text + f"❌ Errore invio payout: {e}")
 
 def send_erc20(to_address: str, amount_myst: Decimal) -> str:
-    """Invia MYST dal wallet tesoreria al destinatario e ritorna tx hash."""
     bal = token.functions.balanceOf(TREASURY_ADDRESS).call()
     need = myst_to_units(amount_myst)
     if bal < need:
@@ -283,9 +275,7 @@ def send_erc20(to_address: str, amount_myst: Decimal) -> str:
     nonce = w3.eth.get_transaction_count(TREASURY_ADDRESS)
     gas_price = w3.eth.gas_price
 
-    tx = token.functions.transfer(
-        Web3.to_checksum_address(to_address), need
-    ).build_transaction({
+    tx = token.functions.transfer(Web3.to_checksum_address(to_address), need).build_transaction({
         "from": TREASURY_ADDRESS,
         "nonce": nonce,
         "gasPrice": gas_price,
@@ -300,21 +290,23 @@ def send_erc20(to_address: str, amount_myst: Decimal) -> str:
     tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
     return Web3.to_hex(tx_hash)
 
-# ─────────────── Bootstrap (webhook) ───────────────
-def main():
+# Unknown
+async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Comando non riconosciuto. Prova /start.")
+
+# ── MAIN ─────────────────────────────────────────────────────────
+async def main():
     global TOKEN_SYMBOL
     try:
         TOKEN_SYMBOL = token.functions.symbol().call()
     except Exception:
         TOKEN_SYMBOL = "MYST"
 
-    if not PUBLIC_URL:
-        raise RuntimeError("PUBLIC_URL non impostata nelle Environment Variables di Render.")
-
     _load_processed()
 
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("wallet", wallet))
     app.add_handler(CommandHandler("price", price))
@@ -322,22 +314,29 @@ def main():
     app.add_handler(CommandHandler("submit", submit))
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-    print("🤖 Bot running (Render webhook mode).")
+    # Health route per Render: GET /
+    async def health(_request):
+        return web.Response(text="MYST BOT ACTIVE", status=200)
+    app.web_app.add_routes([web.get("/", health)])
 
-    PATH = f"bot{BOT_TOKEN}"                    # path segreto legato al token
-    WEBHOOK_URL = f"{PUBLIC_URL}/{PATH}"        # URL completo del webhook
-    print(f"🌐 Imposto webhook su: {WEBHOOK_URL}")
+    # Webhook PTB (imposta webhook e apre listener)
+    path = f"bot{BOT_TOKEN}"                  # path segreto
+    webhook_url = f"{PUBLIC_URL}/{path}"
 
-    # run_webhook è BLOCCANTE e gestisce l'event loop: niente await / asyncio.run
-    app.run_webhook(
+    print(f"🤖 Bot running (Render webhook mode).")
+    print(f"🌐 Imposto webhook su: {webhook_url}")
+
+    await app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        url_path=PATH,
-        webhook_url=WEBHOOK_URL,
+        url_path=path,
+        webhook_url=webhook_url
     )
 
-if __name__ == "__main__":
-    main()
+if _name_ == "_main_":
+    import nest_asyncio
+    nest_asyncio.apply()
+    asyncio.run(main())
 
 
 
