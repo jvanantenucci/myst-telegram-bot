@@ -1,61 +1,85 @@
 # -- coding: utf-8 --
-"""
-MYST Presale Bot – auto-payout BEP-20 su BSC
-Dipendenze:
-  pip install python-dotenv python-telegram-bot==21.4 web3==6.11.4 requests nest_asyncio
-"""
-
 import os
 import json
+import time
 import asyncio
+import threading
 from pathlib import Path
 from decimal import Decimal, getcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from dotenv import load_dotenv
 from web3 import Web3
 from web3.exceptions import TransactionNotFound, TimeExhausted
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Precisione per i calcoli
 getcontext().prec = 50
 
-# ── ENV ──────────────────────────────────────────────────────────
-load_dotenv()
+# ========= ENV SAFE LOAD =========
+def _get_env(key: str, default: str | None = None) -> str:
+    v = os.getenv(key, default if default is not None else "")
+    if v is None:
+        v = ""
+    return v.strip()
 
-BOT_TOKEN         = os.getenv("BOT_TOKEN")
-ADMIN_USER_ID     = int(os.getenv("ADMIN_USER_ID", "0"))
+def _get_required_env(key: str) -> str:
+    v = _get_env(key, "")
+    if not v:
+        raise RuntimeError(f"ENV missing: {key}")
+    return v
 
-BSC_RPC           = os.getenv("BSC_RPC", "https://bsc-dataseed.binance.org")
+def _get_checksum_addr(key: str) -> str:
+    raw = _get_required_env(key)
+    try:
+        return Web3.to_checksum_address(raw)
+    except Exception as e:
+        raise RuntimeError(f"{key} invalid address: {raw} ({e})")
 
-TOKEN_ADDRESS     = Web3.to_checksum_address(os.getenv("TOKEN_ADDRESS"))
-TOKEN_DECIMALS    = int(os.getenv("TOKEN_DECIMALS", "18"))
+BOT_TOKEN       = _get_required_env("BOT_TOKEN")
+ADMIN_USER_ID   = int(_get_env("ADMIN_USER_ID", "0"))
 
-INCASSO_ADDRESS   = Web3.to_checksum_address(os.getenv("INCASSO_ADDRESS"))
+BSC_RPC         = _get_env("BSC_RPC", "https://bsc-dataseed.binance.org")
 
-TREASURY_ADDRESS  = Web3.to_checksum_address(os.getenv("TREASURY_ADDRESS"))
-TREASURY_PRIVKEY  = os.getenv("TREASURY_PRIVKEY")
+TOKEN_ADDRESS   = _get_checksum_addr("TOKEN_ADDRESS")
+TOKEN_DECIMALS  = int(_get_env("TOKEN_DECIMALS", "18"))
 
-RATE              = Decimal(os.getenv("RATE", "1900000"))      # MYST per 1 BNB
-BONUS_BPS         = int(os.getenv("BONUS_BPS", "5000"))        # 100 bps = 1%
-MIN_BNB           = Decimal(os.getenv("MIN_BNB", "0.01"))
-MAX_BNB           = Decimal(os.getenv("MAX_BNB", "1"))
+INCASSO_ADDRESS = _get_checksum_addr("INCASSO_ADDRESS")
+TREASURY_ADDRESS= _get_checksum_addr("TREASURY_ADDRESS")
+TREASURY_PRIVKEY= _get_required_env("TREASURY_PRIVKEY")
 
-AUTO_PAYOUT       = os.getenv("AUTO_PAYOUT", "1") == "1"
-DAILY_CAP_MYST    = Decimal(os.getenv("DAILY_CAP_MYST", "5000000"))
-MAX_PER_TX_MYST   = Decimal(os.getenv("MAX_PER_TX_MYST", "2000000"))
+RATE            = Decimal(_get_env("RATE", "1900000"))
+BONUS_BPS       = int(_get_env("BONUS_BPS", "5000"))
+MIN_BNB         = Decimal(_get_env("MIN_BNB", "0.01"))
+MAX_BNB         = Decimal(_get_env("MAX_BNB", "1"))
+AUTO_PAYOUT     = _get_env("AUTO_PAYOUT", "1") == "1"
+DAILY_CAP_MYST  = Decimal(_get_env("DAILY_CAP_MYST", "5000000"))
+MAX_PER_TX_MYST = Decimal(_get_env("MAX_PER_TX_MYST", "2000000"))
 
-# ── Web3 ─────────────────────────────────────────────────────────
+# Railway: se PUBLIC_URL vuota, usa dominio pubblico automatico
+PUBLIC_URL = _get_env("PUBLIC_URL")
+if not PUBLIC_URL:
+    rail = _get_env("RAILWAY_PUBLIC_DOMAIN")  # es: web-production-xxxx.up.railway.app
+    if rail:
+        PUBLIC_URL = f"https://{rail}"
+
+PORT = int(_get_env("PORT", "8080"))
+
+# Log diagnostico minimale (senza segreti)
+print("ENV CHECK →",
+      {"PUBLIC_URL": PUBLIC_URL,
+       "TOKEN_ADDRESS": TOKEN_ADDRESS,
+       "INCASSO_ADDRESS": INCASSO_ADDRESS,
+       "TREASURY_ADDRESS": TREASURY_ADDRESS})
+
+# ========= Web3 =========
 w3 = Web3(Web3.HTTPProvider(BSC_RPC, request_kwargs={"timeout": 15}))
 
-# ABI minimo ERC20
 ERC20_ABI = [
     {"constant": True, "inputs": [], "name": "name", "outputs": [{"name": "", "type": "string"}], "type": "function"},
     {"constant": False, "inputs": [{"name": "_to","type":"address"},{"name":"_value","type":"uint256"}],
-     "name":"transfer", "outputs":[{"name":"","type":"bool"}], "type":"function"},
+     "name":"transfer", "outputs":[{"name":"","type":"bool"}], "type": "function"},
     {"constant": True, "inputs": [], "name": "symbol", "outputs": [{"name": "", "type": "string"}], "type": "function"},
     {"constant": True, "inputs": [{"name":"_owner","type":"address"}],
      "name":"balanceOf", "outputs":[{"name":"balance","type":"uint256"}], "type": "function"},
@@ -65,7 +89,7 @@ ERC20_ABI = [
 token = w3.eth.contract(address=TOKEN_ADDRESS, abi=ERC20_ABI)
 TOKEN_SYMBOL = None
 
-# ── Idempotenza (anti-doppio payout) ─────────────────────────────
+# ========= Idempotenza =========
 PROCESSED_FILE = Path("processed_tx.json")
 _processed: dict[str, dict] = {}
 _processed_lock = asyncio.Lock()
@@ -99,10 +123,7 @@ async def is_processed(txhash: str) -> bool:
     async with _processed_lock:
         return txhash.lower() in _processed
 
-# ── Utils ────────────────────────────────────────────────────────
-def now_iso():
-    return datetime.now(timezone.utc).isoformat()
-
+# ========= Utils =========
 @dataclass
 class Quote:
     bnb_amount: Decimal
@@ -119,21 +140,18 @@ def quote_for_bnb(bnb_amount: Decimal) -> Quote:
 def myst_to_units(amount_myst: Decimal) -> int:
     return int((amount_myst * (Decimal(10) ** TOKEN_DECIMALS)).to_integral_value())
 
-# ── Comandi base ─────────────────────────────────────────────────
+# ========= Bot Commands =========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
         "🚀 MYST Presale — Phase 1\n\n"
-        f"Contribuisci in BNB e ricevi MYST.\n"
         f"• Wallet incasso: {INCASSO_ADDRESS}\n"
-        f"• Prezzo: 1 BNB = {RATE:,} MYST\n"
-        f"• Bonus: +{BONUS_BPS/100:.0f}%\n"
-        f"• Min: {MIN_BNB} BNB  • Max: {MAX_BNB} BNB\n\n"
-        "Passi:\n"
-        "1) Invia BNB al wallet sopra.\n"
-        "2) Usa /submit <txhash> <tuoWalletBSC> per ricevere i MYST.\n\n"
-        "ℹ️ Comandi: /wallet • /price • /status <txhash>"
+        f"• 1 BNB = {RATE:,} MYST (+{BONUS_BPS/100:.0f}% bonus)\n"
+        f"• Min: {MIN_BNB} BNB — Max: {MAX_BNB} BNB\n\n"
+        "1) Invia BNB al wallet sopra\n"
+        "2) /submit <txhash> <tuoWalletBSC>\n\n"
+        "Comandi: /wallet • /price • /status <txhash>"
     )
-    await update.message.reply_markdown(txt)
+    await update.message.reply_text(txt)
 
 async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"💼 Wallet incasso (BNB):\n{INCASSO_ADDRESS}", quote=True)
@@ -141,10 +159,9 @@ async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = quote_for_bnb(Decimal("1"))
     await update.message.reply_text(
-        f"💰 1 BNB = {int(q.myst_base):,} MYST (+{int(q.myst_bonus):,} bonus) → {int(q.myst_total):,} MYST"
+        f"💰 1 BNB = {int(q.myst_base):,} MYST (+{int(q.myst_bonus):,}) → {int(q.myst_total):,} MYST"
     )
 
-# ── Verifica e payout ────────────────────────────────────────────
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 1:
         await update.message.reply_text("Uso: /status <txhash>")
@@ -163,28 +180,24 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await update.message.reply_text("❌ Wallet BSC non valido.")
         return
-
     await verify_tx_and_show(update, txhash, dest_wallet, preview_only=False)
 
 async def verify_tx_and_show(update: Update, txhash: str, payout_wallet: str | None, preview_only: bool):
     msg = await update.message.reply_text("🔎 Verifico la transazione su BSC…")
     txhash = txhash.strip()
 
-    # formato hash
     if not (txhash.startswith("0x") and len(txhash) == 66):
         await msg.edit_text("❌ Tx hash non valido (formato errato).")
         return
 
-    # idempotenza: blocca doppi payout
     if not preview_only and await is_processed(txhash):
-        await msg.edit_text("✅ Transazione già registrata e pagata in precedenza. Nessun nuovo payout eseguito.")
+        await msg.edit_text("✅ TX già registrata e pagata in precedenza.")
         return
 
-    # recupero tx + receipt
     try:
         tx = w3.eth.get_transaction(txhash)
     except TransactionNotFound:
-        await msg.edit_text("❌ Transazione non trovata su BSC. Riprova tra 30–60 secondi.")
+        await msg.edit_text("❌ TX non trovata su BSC. Riprova tra 30–60 secondi.")
         return
     except Exception as e:
         await msg.edit_text(f"❌ Errore get_transaction: {e}")
@@ -193,15 +206,14 @@ async def verify_tx_and_show(update: Update, txhash: str, payout_wallet: str | N
     try:
         receipt = w3.eth.wait_for_transaction_receipt(txhash, timeout=60, poll_latency=2)
     except TimeExhausted:
-        await msg.edit_text("⏱️ La transazione non è ancora confermata (timeout 60s). Riprova tra poco.")
+        await msg.edit_text("⏱️ TX non ancora confermata (timeout 60s). Riprova tra poco.")
         return
     except Exception as e:
         await msg.edit_text(f"❌ Errore receipt: {e}")
         return
 
-    # deve essere successo e verso INCASSO_ADDRESS
     if receipt.status != 1:
-        await msg.edit_text("❌ La transazione non è success (status != 1).")
+        await msg.edit_text("❌ La TX non è success (status != 1).")
         return
 
     to_addr = tx.get("to")
@@ -222,60 +234,43 @@ async def verify_tx_and_show(update: Update, txhash: str, payout_wallet: str | N
         )
         return
 
-    # importo BNB
     bnb_amount = Decimal(Web3.from_wei(tx["value"], "ether"))
     if bnb_amount < MIN_BNB or bnb_amount > MAX_BNB:
-        await msg.edit_text(f"❌ Importo fuori limiti. Min {MIN_BNB} BNB – Max {MAX_BNB} BNB.")
+        await msg.edit_text(f"❌ Importo fuori limiti. Min {MIN_BNB} – Max {MAX_BNB} BNB.")
         return
 
     q = quote_for_bnb(bnb_amount)
-
     base_text = (
         "✅ Transazione verificata!\n"
         f"• From: {tx['from']}\n"
         f"• To: {INCASSO_ADDRESS}\n"
         f"• Amount: {bnb_amount} BNB\n\n"
-        "💎 MYST calcolati:\n"
-        f"• Base: {int(q.myst_base):,} MYST\n"
-        f"• Bonus (+{BONUS_BPS/100:.0f}%): {int(q.myst_bonus):,} MYST\n"
-        f"• Totale: {int(q.myst_total):,} MYST\n"
+        "💎 MYST:\n"
+        f"• Base: {int(q.myst_base):,}\n"
+        f"• Bonus (+{BONUS_BPS/100:.0f}%): {int(q.myst_bonus):,}\n"
+        f"• Totale: {int(q.myst_total):,}\n"
     )
 
-    # solo anteprima o autopayout OFF
     if preview_only or not AUTO_PAYOUT:
         await msg.edit_text(base_text + "🧾 Modalità anteprima. Nessun payout eseguito.")
         return
 
-    # limite per singola transazione
     if q.myst_total > MAX_PER_TX_MYST:
-        await msg.edit_text(
-            base_text + f"⚠️ Limite per singolo payout: {int(MAX_PER_TX_MYST):,} MYST. Contatta supporto."
-        )
+        await msg.edit_text(base_text + f"⚠️ Limite payout: {int(MAX_PER_TX_MYST):,} MYST. Contatta supporto.")
         return
 
-    # deve esserci wallet destinatario
     if not payout_wallet:
-        await msg.edit_text(
-            base_text + "❗ Nessun wallet BSC di destinazione indicato. Usa: /submit <txhash> <walletBSC>"
-        )
+        await msg.edit_text(base_text + "❗ Usa: /submit <txhash> <walletBSC>")
         return
 
-    # payout
     try:
         payout_tx = send_erc20(payout_wallet, q.myst_total)
-        # marca come pagato SOLO dopo invio riuscito
         await mark_processed(txhash, payout_wallet, myst_to_units(q.myst_total))
-        await msg.edit_text(
-            base_text
-            + f"📨 Payout inviato a {payout_wallet}.\n"
-            + f"Tx: https://bscscan.com/tx/{payout_tx}"
-        )
+        await msg.edit_text(base_text + f"📨 Payout a {payout_wallet}\nTx: https://bscscan.com/tx/{payout_tx}")
     except Exception as e:
         await msg.edit_text(base_text + f"❌ Errore invio payout: {e}")
 
 def send_erc20(to_address: str, amount_myst: Decimal) -> str:
-    """Invia MYST dal wallet tesoreria al destinatario e ritorna tx hash."""
-    # check saldo tesoreria
     bal = token.functions.balanceOf(TREASURY_ADDRESS).call()
     need = myst_to_units(amount_myst)
     if bal < need:
@@ -292,23 +287,19 @@ def send_erc20(to_address: str, amount_myst: Decimal) -> str:
         "gasPrice": gas_price,
     })
 
-    # stima gas
     try:
         tx["gas"] = w3.eth.estimate_gas(tx)
     except Exception:
         tx["gas"] = 120000
 
-    # firma e invio (web3.py v6 -> raw_transaction)
     signed = w3.eth.account.sign_transaction(tx, private_key=TREASURY_PRIVKEY)
     tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-
     return Web3.to_hex(tx_hash)
 
-# ── Unknown commands ─────────────────────────────────────────────
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Comando non riconosciuto. Prova /start.")
 
-# ── Main ─────────────────────────────────────────────────────────
+# ========= Main =========
 async def main():
     global TOKEN_SYMBOL
     try:
@@ -319,7 +310,6 @@ async def main():
     _load_processed()
 
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("wallet", wallet))
     app.add_handler(CommandHandler("price", price))
@@ -327,16 +317,29 @@ async def main():
     app.add_handler(CommandHandler("submit", submit))
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-    print("🤖 Bot running. Ctrl+C per fermare.")
-    await app.run_polling()
+    if not PUBLIC_URL:
+        raise RuntimeError("PUBLIC_URL non disponibile. Imposta PUBLIC_URL o usa RAILWAY_PUBLIC_DOMAIN.")
 
-if __name__ == "__main__":
+    PATH = f"bot{BOT_TOKEN}"
+    WEBHOOK_URL = f"{PUBLIC_URL.rstrip('/')}/{PATH}"
+    print(f"🌐 Imposto webhook: {WEBHOOK_URL}")
+
+    await app.bot.set_webhook(WEBHOOK_URL)
+    await app.run_webhook(listen="0.0.0.0", port=PORT, url_path=PATH)
+
+def _keep_alive():
+    while True:
+        time.sleep(600)
+
+if _name_ == "_main_":
+    threading.Thread(target=_keep_alive, daemon=True).start()
     import nest_asyncio
     nest_asyncio.apply()
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         print("\n🛑 Bot stopped.")
+
 
 
 
