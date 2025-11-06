@@ -333,10 +333,11 @@ async def main():
         webhook_url=webhook_url
     )
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     import nest_asyncio
     nest_asyncio.apply()
     asyncio.run(main())
+
 
 
 
