@@ -1,8 +1,14 @@
 # -- coding: utf-8 --
 """
 MYST Presale Bot – auto-payout BEP-20 su BSC
-Dipendenze:
-  pip install python-dotenv python-telegram-bot==21.4 web3==6.11.4 requests nest_asyncio
+Dipendenze (requirements.txt):
+  python-telegram-bot==21.4
+  web3==6.19.0
+  python-dotenv==1.0.1
+  nest-asyncio==1.6.0
+  Flask==3.0.0
+  requests
+  pytz==2024.1
 """
 
 import os
@@ -19,6 +25,7 @@ from dotenv import load_dotenv
 from web3 import Web3
 from web3.exceptions import TransactionNotFound, TimeExhausted
 
+from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -49,6 +56,10 @@ MAX_BNB           = Decimal(os.getenv("MAX_BNB", "1"))
 AUTO_PAYOUT       = os.getenv("AUTO_PAYOUT", "1") == "1"
 DAILY_CAP_MYST    = Decimal(os.getenv("DAILY_CAP_MYST", "5000000"))
 MAX_PER_TX_MYST   = Decimal(os.getenv("MAX_PER_TX_MYST", "2000000"))
+
+PUBLIC_URL        = os.getenv("PUBLIC_URL")  # es.: https://myst-telegram-bot.onrender.com
+if not PUBLIC_URL:
+    raise RuntimeError("PUBLIC_URL non impostata nelle Environment Variables di Render.")
 
 # ── Web3 ─────────────────────────────────────────────────────────
 w3 = Web3(Web3.HTTPProvider(BSC_RPC, request_kwargs={"timeout": 15}))
@@ -201,7 +212,7 @@ async def verify_tx_and_show(update: Update, txhash: str, payout_wallet: str | N
         await msg.edit_text(f"❌ Errore receipt: {e}")
         return
 
-    # deve essere successo e verso INCASSO_ADDRESS
+    # deve essere success e verso INCASSO_ADDRESS
     if receipt.status != 1:
         await msg.edit_text("❌ La transazione non è success (status != 1).")
         return
@@ -265,7 +276,6 @@ async def verify_tx_and_show(update: Update, txhash: str, payout_wallet: str | N
     # payout
     try:
         payout_tx = send_erc20(payout_wallet, q.myst_total)
-        # marca come pagato SOLO dopo invio riuscito
         await mark_processed(txhash, payout_wallet, myst_to_units(q.myst_total))
         await msg.edit_text(
             base_text
@@ -277,7 +287,6 @@ async def verify_tx_and_show(update: Update, txhash: str, payout_wallet: str | N
 
 def send_erc20(to_address: str, amount_myst: Decimal) -> str:
     """Invia MYST dal wallet tesoreria al destinatario e ritorna tx hash."""
-    # check saldo tesoreria
     bal = token.functions.balanceOf(TREASURY_ADDRESS).call()
     need = myst_to_units(amount_myst)
     if bal < need:
@@ -294,23 +303,20 @@ def send_erc20(to_address: str, amount_myst: Decimal) -> str:
         "gasPrice": gas_price,
     })
 
-    # stima gas
     try:
         tx["gas"] = w3.eth.estimate_gas(tx)
     except Exception:
         tx["gas"] = 120000
 
-    # firma e invio (web3.py v6 -> raw_transaction)
     signed = w3.eth.account.sign_transaction(tx, private_key=TREASURY_PRIVKEY)
     tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-
     return Web3.to_hex(tx_hash)
 
 # ── Unknown commands ─────────────────────────────────────────────
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Comando non riconosciuto. Prova /start.")
 
-# ── Main ─────────────────────────────────────────────────────────
+# ── Main (webhook PTB su PORT) ───────────────────────────────────
 async def main():
     global TOKEN_SYMBOL
     try:
@@ -331,35 +337,39 @@ async def main():
 
     print("🤖 Bot running (Render webhook mode).")
 
-    # --- WEBHOOK MODE (senza polling, compatibile con Render) ---
-    PORT = int(os.getenv("PORT", "10000"))
-    PUBLIC_URL = os.getenv("PUBLIC_URL")  # es: https://myst-telegram-bot.onrender.com
-    if not PUBLIC_URL:
-        raise RuntimeError("PUBLIC_URL non impostata nelle Environment Variables di Render.")
-    PATH = f"bot{BOT_TOKEN}"              # path segreto collegato al token
+    PORT = int(os.getenv("PORT", "10000"))  # Render imposta PORT
+    PATH = f"bot{BOT_TOKEN}"                # path segreto collegato al token
     WEBHOOK_URL = f"{PUBLIC_URL}/{PATH}"
 
     print(f"🌐 Imposto webhook su: {WEBHOOK_URL}")
     await app.bot.set_webhook(WEBHOOK_URL)
+
     await app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
         url_path=PATH
     )
 
-# --- Keep alive per Render (piano free) ---
-def _keep_alive():
-    while True:
-        time.sleep(600)
+# --- Health server Flask su porta diversa (facoltativo) ----------
+HEALTH_PORT = int(os.getenv("HEALTH_PORT", "10001"))
+health_app = Flask(name_)
 
+@_health_app.get("/")
+def _health():
+    return "MYST BOT ACTIVE", 200
+
+def _run_health_server():
+    _health_app.run(host="0.0.0.0", port=HEALTH_PORT)
+
+# --- Bootstrap ---------------------------------------------------
 if __name__ == "__main__":
-    # avvia thread keep-alive prima dell'event loop
-    threading.Thread(target=_keep_alive, daemon=True).start()
+    # Avvia server health in background
+    threading.Thread(target=_run_health_server, daemon=True).start()
 
     import nest_asyncio
     nest_asyncio.apply()
+
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         print("\n🛑 Bot stopped.")
-
