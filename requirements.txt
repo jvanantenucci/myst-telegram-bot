@@ -1,9 +1,10 @@
 python-telegram-bot==21.4
-flask
-nest_asyncio==1.6.0
-python-dotenv==1.0.1
 web3==6.11.4
-setuptools
+python-dotenv==1.0.1
+nest_asyncio==1.6.0
+flask
+gunicorn
+
 
 
 
