@@ -352,7 +352,7 @@ async def main():
 
 # --- Health server Flask su porta diversa (facoltativo) ----------
 HEALTH_PORT = int(os.getenv("HEALTH_PORT", "10001"))
-health_app = Flask(name_)
+health_app = Flask(__name__)
 
 @_health_app.get("/")
 def _health():
@@ -373,3 +373,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         print("\n🛑 Bot stopped.")
+
