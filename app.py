@@ -354,12 +354,12 @@ async def main():
 HEALTH_PORT = int(os.getenv("HEALTH_PORT", "10001"))
 health_app = Flask(__name__)
 
-@_health_app.get("/")
+@health_app.get("/")
 def _health():
     return "MYST BOT ACTIVE", 200
 
 def _run_health_server():
-    _health_app.run(host="0.0.0.0", port=HEALTH_PORT)
+    health_app.run(host="0.0.0.0", port=HEALTH_PORT)
 
 # --- Bootstrap ---------------------------------------------------
 if __name__ == "__main__":
@@ -373,4 +373,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         print("\n🛑 Bot stopped.")
+
 
