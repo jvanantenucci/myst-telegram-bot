@@ -328,7 +328,20 @@ async def main():
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
     print("🤖 Bot running. Ctrl+C per fermare.")
-    await app.run_polling()
+    # --- WEBHOOK MODE (senza polling, compatibile con Render) ---
+import os
+PORT = int(os.getenv("PORT", "10000"))
+PUBLIC_URL = os.getenv("PUBLIC_URL")  # es: https://myst-telegram-bot.onrender.com
+PATH = f"bot{BOT_TOKEN}"              # path segreto collegato al token
+WEBHOOK_URL = f"{PUBLIC_URL}/{PATH}"
+
+print(f"🌐 Imposto webhook su: {WEBHOOK_URL}")
+await app.bot.set_webhook(WEBHOOK_URL)
+await app.run_webhook(
+    listen="0.0.0.0",
+    port=PORT,
+    url_path=PATH
+)
 
 if __name__ == "__main__":
     import nest_asyncio
@@ -354,3 +367,4 @@ def _run_web():
 
 # Avvio parallelo del web server per Render
 threading.Thread(target=_run_web, daemon=True).start()
+
