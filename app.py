@@ -7,7 +7,9 @@ Dipendenze:
 
 import os
 import json
+import time
 import asyncio
+import threading
 from pathlib import Path
 from decimal import Decimal, getcontext
 from dataclasses import dataclass
@@ -332,6 +334,8 @@ async def main():
     # --- WEBHOOK MODE (senza polling, compatibile con Render) ---
     PORT = int(os.getenv("PORT", "10000"))
     PUBLIC_URL = os.getenv("PUBLIC_URL")  # es: https://myst-telegram-bot.onrender.com
+    if not PUBLIC_URL:
+        raise RuntimeError("PUBLIC_URL non impostata nelle Environment Variables di Render.")
     PATH = f"bot{BOT_TOKEN}"              # path segreto collegato al token
     WEBHOOK_URL = f"{PUBLIC_URL}/{PATH}"
 
@@ -343,13 +347,18 @@ async def main():
         url_path=PATH
     )
 
-if __name__ == "__main__":
+# --- Keep alive per Render (piano free) ---
+def _keep_alive():
+    while True:
+        time.sleep(600)
+
+if _name_ == "_main_":
+    # avvia thread keep-alive prima dell'event loop
+    threading.Thread(target=_keep_alive, daemon=True).start()
+
     import nest_asyncio
     nest_asyncio.apply()
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         print("\n🛑 Bot stopped.")
-
-
-
