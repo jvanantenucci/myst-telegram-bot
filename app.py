@@ -1,12 +1,8 @@
 # -- coding: utf-8 --
 """
-MYST Presale Bot – webhook ready for Render (python-telegram-bot==20.7)
-
-Requisiti (requirements.txt):
-  python-telegram-bot==20.7
-  web3==6.19.0
-  python-dotenv==1.0.1
-  nest_asyncio==1.6.0
+MYST Presale Bot – auto-payout BEP-20 su BSC
+Dipendenze:
+  pip install python-dotenv python-telegram-bot==21.4 web3==6.11.4 requests nest_asyncio
 """
 
 import os
@@ -23,9 +19,6 @@ from web3.exceptions import TransactionNotFound, TimeExhausted
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-
-# PTB usa aiohttp sotto: la usiamo per il health-check "/"
-from aiohttp import web
 
 # Precisione per i calcoli
 getcontext().prec = 50
@@ -55,14 +48,6 @@ AUTO_PAYOUT       = os.getenv("AUTO_PAYOUT", "1") == "1"
 DAILY_CAP_MYST    = Decimal(os.getenv("DAILY_CAP_MYST", "5000000"))
 MAX_PER_TX_MYST   = Decimal(os.getenv("MAX_PER_TX_MYST", "2000000"))
 
-PUBLIC_URL        = os.getenv("PUBLIC_URL")  # ES. https://myst-telegram-bot.onrender.com
-PORT              = int(os.getenv("PORT", "10000"))
-
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN non impostato")
-if not PUBLIC_URL or not PUBLIC_URL.startswith("https://"):
-    raise RuntimeError("PUBLIC_URL non impostata o non HTTPS (es. https://mio-servizio.onrender.com)")
-
 # ── Web3 ─────────────────────────────────────────────────────────
 w3 = Web3(Web3.HTTPProvider(BSC_RPC, request_kwargs={"timeout": 15}))
 
@@ -70,7 +55,7 @@ w3 = Web3(Web3.HTTPProvider(BSC_RPC, request_kwargs={"timeout": 15}))
 ERC20_ABI = [
     {"constant": True, "inputs": [], "name": "name", "outputs": [{"name": "", "type": "string"}], "type": "function"},
     {"constant": False, "inputs": [{"name": "_to","type":"address"},{"name":"_value","type":"uint256"}],
-     "name":"transfer", "outputs":[{"name":"","type":"bool"}], "type": "function"},
+     "name":"transfer", "outputs":[{"name":"","type":"bool"}], "type":"function"},
     {"constant": True, "inputs": [], "name": "symbol", "outputs": [{"name": "", "type": "string"}], "type": "function"},
     {"constant": True, "inputs": [{"name":"_owner","type":"address"}],
      "name":"balanceOf", "outputs":[{"name":"balance","type":"uint256"}], "type": "function"},
@@ -115,6 +100,9 @@ async def is_processed(txhash: str) -> bool:
         return txhash.lower() in _processed
 
 # ── Utils ────────────────────────────────────────────────────────
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
 @dataclass
 class Quote:
     bnb_amount: Decimal
@@ -145,7 +133,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "2) Usa /submit <txhash> <tuoWalletBSC> per ricevere i MYST.\n\n"
         "ℹ️ Comandi: /wallet • /price • /status <txhash>"
     )
-    await update.message.reply_text(txt)
+    await update.message.reply_markdown(txt)
 
 async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"💼 Wallet incasso (BNB):\n{INCASSO_ADDRESS}", quote=True)
@@ -175,20 +163,24 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await update.message.reply_text("❌ Wallet BSC non valido.")
         return
+
     await verify_tx_and_show(update, txhash, dest_wallet, preview_only=False)
 
 async def verify_tx_and_show(update: Update, txhash: str, payout_wallet: str | None, preview_only: bool):
     msg = await update.message.reply_text("🔎 Verifico la transazione su BSC…")
     txhash = txhash.strip()
 
+    # formato hash
     if not (txhash.startswith("0x") and len(txhash) == 66):
         await msg.edit_text("❌ Tx hash non valido (formato errato).")
         return
 
+    # idempotenza: blocca doppi payout
     if not preview_only and await is_processed(txhash):
-        await msg.edit_text("✅ Transazione già registrata. Nessun nuovo payout.")
+        await msg.edit_text("✅ Transazione già registrata e pagata in precedenza. Nessun nuovo payout eseguito.")
         return
 
+    # recupero tx + receipt
     try:
         tx = w3.eth.get_transaction(txhash)
     except TransactionNotFound:
@@ -201,12 +193,13 @@ async def verify_tx_and_show(update: Update, txhash: str, payout_wallet: str | N
     try:
         receipt = w3.eth.wait_for_transaction_receipt(txhash, timeout=60, poll_latency=2)
     except TimeExhausted:
-        await msg.edit_text("⏱️ La transazione non è ancora confermata (timeout 60s).")
+        await msg.edit_text("⏱️ La transazione non è ancora confermata (timeout 60s). Riprova tra poco.")
         return
     except Exception as e:
         await msg.edit_text(f"❌ Errore receipt: {e}")
         return
 
+    # deve essere successo e verso INCASSO_ADDRESS
     if receipt.status != 1:
         await msg.edit_text("❌ La transazione non è success (status != 1).")
         return
@@ -224,14 +217,15 @@ async def verify_tx_and_show(update: Update, txhash: str, payout_wallet: str | N
 
     if to_addr != INCASSO_ADDRESS:
         await msg.edit_text(
-            "❌ La TX non è diretta al wallet d’incasso.\n"
+            "❌ La TX non è diretta al wallet d’incasso ufficiale.\n"
             f"Atteso: {INCASSO_ADDRESS}\nTrovato: {to_addr}"
         )
         return
 
+    # importo BNB
     bnb_amount = Decimal(Web3.from_wei(tx["value"], "ether"))
     if bnb_amount < MIN_BNB or bnb_amount > MAX_BNB:
-        await msg.edit_text(f"❌ Importo fuori limiti. Min {MIN_BNB} – Max {MAX_BNB} BNB.")
+        await msg.edit_text(f"❌ Importo fuori limiti. Min {MIN_BNB} BNB – Max {MAX_BNB} BNB.")
         return
 
     q = quote_for_bnb(bnb_amount)
@@ -247,26 +241,41 @@ async def verify_tx_and_show(update: Update, txhash: str, payout_wallet: str | N
         f"• Totale: {int(q.myst_total):,} MYST\n"
     )
 
+    # solo anteprima o autopayout OFF
     if preview_only or not AUTO_PAYOUT:
         await msg.edit_text(base_text + "🧾 Modalità anteprima. Nessun payout eseguito.")
         return
 
+    # limite per singola transazione
     if q.myst_total > MAX_PER_TX_MYST:
-        await msg.edit_text(base_text + f"⚠️ Limite per payout: {int(MAX_PER_TX_MYST):,} MYST.")
+        await msg.edit_text(
+            base_text + f"⚠️ Limite per singolo payout: {int(MAX_PER_TX_MYST):,} MYST. Contatta supporto."
+        )
         return
 
+    # deve esserci wallet destinatario
     if not payout_wallet:
-        await msg.edit_text(base_text + "❗ Serve il wallet BSC di destinazione. Usa: /submit <txhash> <walletBSC>")
+        await msg.edit_text(
+            base_text + "❗ Nessun wallet BSC di destinazione indicato. Usa: /submit <txhash> <walletBSC>"
+        )
         return
 
+    # payout
     try:
         payout_tx = send_erc20(payout_wallet, q.myst_total)
+        # marca come pagato SOLO dopo invio riuscito
         await mark_processed(txhash, payout_wallet, myst_to_units(q.myst_total))
-        await msg.edit_text(base_text + f"📨 Payout inviato a {payout_wallet}.\nTx: https://bscscan.com/tx/{payout_tx}")
+        await msg.edit_text(
+            base_text
+            + f"📨 Payout inviato a {payout_wallet}.\n"
+            + f"Tx: https://bscscan.com/tx/{payout_tx}"
+        )
     except Exception as e:
         await msg.edit_text(base_text + f"❌ Errore invio payout: {e}")
 
 def send_erc20(to_address: str, amount_myst: Decimal) -> str:
+    """Invia MYST dal wallet tesoreria al destinatario e ritorna tx hash."""
+    # check saldo tesoreria
     bal = token.functions.balanceOf(TREASURY_ADDRESS).call()
     need = myst_to_units(amount_myst)
     if bal < need:
@@ -275,26 +284,31 @@ def send_erc20(to_address: str, amount_myst: Decimal) -> str:
     nonce = w3.eth.get_transaction_count(TREASURY_ADDRESS)
     gas_price = w3.eth.gas_price
 
-    tx = token.functions.transfer(Web3.to_checksum_address(to_address), need).build_transaction({
+    tx = token.functions.transfer(
+        Web3.to_checksum_address(to_address), need
+    ).build_transaction({
         "from": TREASURY_ADDRESS,
         "nonce": nonce,
         "gasPrice": gas_price,
     })
 
+    # stima gas
     try:
         tx["gas"] = w3.eth.estimate_gas(tx)
     except Exception:
         tx["gas"] = 120000
 
+    # firma e invio (web3.py v6 -> raw_transaction)
     signed = w3.eth.account.sign_transaction(tx, private_key=TREASURY_PRIVKEY)
     tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+
     return Web3.to_hex(tx_hash)
 
-# Unknown
+# ── Unknown commands ─────────────────────────────────────────────
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Comando non riconosciuto. Prova /start.")
 
-# ── MAIN ─────────────────────────────────────────────────────────
+# ── Main ─────────────────────────────────────────────────────────
 async def main():
     global TOKEN_SYMBOL
     try:
@@ -306,7 +320,6 @@ async def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("wallet", wallet))
     app.add_handler(CommandHandler("price", price))
@@ -314,29 +327,17 @@ async def main():
     app.add_handler(CommandHandler("submit", submit))
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-    # Health route per Render: GET /
-    async def health(_request):
-        return web.Response(text="MYST BOT ACTIVE", status=200)
-    app.web_app.add_routes([web.get("/", health)])
-
-    # Webhook PTB (imposta webhook e apre listener)
-    path = f"bot{BOT_TOKEN}"                  # path segreto
-    webhook_url = f"{PUBLIC_URL}/{path}"
-
-    print(f"🤖 Bot running (Render webhook mode).")
-    print(f"🌐 Imposto webhook su: {webhook_url}")
-
-    await app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=path,
-        webhook_url=webhook_url
-    )
+    print("🤖 Bot running. Ctrl+C per fermare.")
+    await app.run_polling()
 
 if __name__ == "__main__":
     import nest_asyncio
     nest_asyncio.apply()
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        print("\n🛑 Bot stopped.")
+
 
 
 
