@@ -55,7 +55,7 @@ w3 = Web3(Web3.HTTPProvider(BSC_RPC, request_kwargs={"timeout": 15}))
 ERC20_ABI = [
     {"constant": True, "inputs": [], "name": "name", "outputs": [{"name": "", "type": "string"}], "type": "function"},
     {"constant": False, "inputs": [{"name": "_to","type":"address"},{"name":"_value","type":"uint256"}],
-     "name":"transfer", "outputs":[{"name":"","type":"bool"}], "type":"function"},
+     "name":"transfer", "outputs":[{"name":"","type":"bool"}], "type": "function"},
     {"constant": True, "inputs": [], "name": "symbol", "outputs": [{"name": "", "type": "string"}], "type": "function"},
     {"constant": True, "inputs": [{"name":"_owner","type":"address"}],
      "name":"balanceOf", "outputs":[{"name":"balance","type":"uint256"}], "type": "function"},
@@ -133,7 +133,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "2) Usa /submit <txhash> <tuoWalletBSC> per ricevere i MYST.\n\n"
         "ℹ️ Comandi: /wallet • /price • /status <txhash>"
     )
-    await update.message.reply_markdown(txt)
+    await update.message.reply_text(txt)
 
 async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"💼 Wallet incasso (BNB):\n{INCASSO_ADDRESS}", quote=True)
@@ -327,44 +327,28 @@ async def main():
     app.add_handler(CommandHandler("submit", submit))
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-    print("🤖 Bot running. Ctrl+C per fermare.")
+    print("🤖 Bot running (Render webhook mode).")
+
     # --- WEBHOOK MODE (senza polling, compatibile con Render) ---
-import os
-PORT = int(os.getenv("PORT", "10000"))
-PUBLIC_URL = os.getenv("PUBLIC_URL")  # es: https://myst-telegram-bot.onrender.com
-PATH = f"bot{BOT_TOKEN}"              # path segreto collegato al token
-WEBHOOK_URL = f"{PUBLIC_URL}/{PATH}"
+    PORT = int(os.getenv("PORT", "10000"))
+    PUBLIC_URL = os.getenv("PUBLIC_URL")  # es: https://myst-telegram-bot.onrender.com
+    PATH = f"bot{BOT_TOKEN}"              # path segreto collegato al token
+    WEBHOOK_URL = f"{PUBLIC_URL}/{PATH}"
 
-print(f"🌐 Imposto webhook su: {WEBHOOK_URL}")
-await app.bot.set_webhook(WEBHOOK_URL)
-await app.run_webhook(
-    listen="0.0.0.0",
-    port=PORT,
-    url_path=PATH
-)
+    print(f"🌐 Imposto webhook su: {WEBHOOK_URL}")
+    await app.bot.set_webhook(WEBHOOK_URL)
+    await app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=PATH
+    )
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     import nest_asyncio
     nest_asyncio.apply()
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-
         print("\n🛑 Bot stopped.")
-      # --- HTTP health endpoint per Render ---
-import os, threading
-from flask import Flask
 
-_web = Flask(__name__)
-
-@_web.get("/")
-def health():
-    return "OK", 200
-
-def _run_web():
-    port = int(os.getenv("PORT", "10000"))
-    _web.run(host="0.0.0.0", port=port)
-
-# Avvio parallelo del web server per Render
-threading.Thread(target=_run_web, daemon=True).start()
 
