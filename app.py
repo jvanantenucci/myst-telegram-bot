@@ -337,41 +337,33 @@ async def main():
 
     print("🤖 Bot running (Render webhook mode).")
 
-    PORT = int(os.getenv("PORT", "10000"))  # Render imposta PORT
-    PATH = f"bot{BOT_TOKEN}"                # path segreto collegato al token
+    # --- WEBHOOK MODE (compatibile con Render) ---
+    PORT = int(os.getenv("PORT", "10000"))
+    PUBLIC_URL = os.getenv("PUBLIC_URL")  # es: https://myst-telegram-bot.onrender.com
+    if not PUBLIC_URL:
+        raise RuntimeError("PUBLIC_URL non impostata nelle Environment Variables di Render.")
+
+    PATH = f"bot{BOT_TOKEN}"              # path segreto collegato al token
     WEBHOOK_URL = f"{PUBLIC_URL}/{PATH}"
 
     print(f"🌐 Imposto webhook su: {WEBHOOK_URL}")
-    await app.bot.set_webhook(WEBHOOK_URL)
 
-    await app.run_webhook(
+    # IMPORTANTE: run_webhook è BLOCCANTE e NON si usa con 'await'
+    # inoltre imposta da solo il webhook, quindi non chiamare bot.set_webhook
+    app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        url_path=PATH
+        url_path=PATH,
+        webhook_url=WEBHOOK_URL,
     )
 
-# --- Health server Flask su porta diversa (facoltativo) ----------
-HEALTH_PORT = int(os.getenv("HEALTH_PORT", "10001"))
-health_app = Flask(__name__)
+# --- NIENTE Flask/health server: run_webhook già apre la porta su Render ---
 
-@health_app.get("/")
-def _health():
-    return "MYST BOT ACTIVE", 200
-
-def _run_health_server():
-    health_app.run(host="0.0.0.0", port=HEALTH_PORT)
-
-# --- Bootstrap ---------------------------------------------------
 if __name__ == "__main__":
-    # Avvia server health in background
-    threading.Thread(target=_run_health_server, daemon=True).start()
-
+    # niente thread extra, niente keep-alive, niente nest_asyncio qui
+    # run_webhook sopra è bloccante e parte direttamente da main()
     import nest_asyncio
     nest_asyncio.apply()
-
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        print("\n🛑 Bot stopped.")
+    asyncio.run(main())
 
 
