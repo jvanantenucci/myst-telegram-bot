@@ -4,6 +4,8 @@ python-dotenv==1.0.1
 nest_asyncio==1.6.0
 flask
 gunicorn
+setuptools
+
 
 
 
