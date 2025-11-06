@@ -336,4 +336,21 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
+
         print("\n🛑 Bot stopped.")
+      # --- HTTP health endpoint per Render ---
+import os, threading
+from flask import Flask
+
+_web = Flask(__name__)
+
+@_web.get("/")
+def health():
+    return "OK", 200
+
+def _run_web():
+    port = int(os.getenv("PORT", "10000"))
+    _web.run(host="0.0.0.0", port=port)
+
+# Avvio parallelo del web server per Render
+threading.Thread(target=_run_web, daemon=True).start()
