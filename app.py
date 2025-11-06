@@ -352,7 +352,7 @@ def _keep_alive():
     while True:
         time.sleep(600)
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     # avvia thread keep-alive prima dell'event loop
     threading.Thread(target=_keep_alive, daemon=True).start()
 
@@ -362,3 +362,4 @@ if _name_ == "_main_":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         print("\n🛑 Bot stopped.")
+
