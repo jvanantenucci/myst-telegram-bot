@@ -1,4 +1,7 @@
 python-telegram-bot==20.7
 web3==6.19.0
 python-dotenv==1.0.1
+
 pytz==2024.1
+flask
+gunicorn
