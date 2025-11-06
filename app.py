@@ -343,12 +343,13 @@ async def main():
         url_path=PATH
     )
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     import nest_asyncio
     nest_asyncio.apply()
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         print("\n🛑 Bot stopped.")
+
 
 
