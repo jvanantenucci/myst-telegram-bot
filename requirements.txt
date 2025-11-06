@@ -5,3 +5,4 @@ python-dotenv==1.0.1
 pytz==2024.1
 flask
 gunicorn
+nest_asyncio==1.6.0
